@@ -88,6 +88,63 @@ def add_action(action, to_dict):
     add_msg(action.feedback_message, to_dict)
 
 
+
+def generate_type_hash__(
+    full_type_description,
+    hash_lookup,
+    output_dir,
+) -> str:
+
+    top_type_name = full_type_description['type_description']['type_name']
+    hashes = [{
+        'type_name': top_type_name,
+        'hash_string': hash_lookup[top_type_name],
+    }]
+    for referenced_type in full_type_description['referenced_type_descriptions']:
+        hashes.append({
+            'type_name': referenced_type['type_name'],
+            'hash_string': hash_lookup[referenced_type['type_name']],
+        })
+    json_content = {
+        'type_description_msg': full_type_description,
+        'type_hashes': hashes,
+    }
+    rel_path = Path(*top_type_name.split('/')[1:])
+    json_path = output_dir / rel_path.with_suffix('.json')
+    with json_path.open('w', encoding='utf-8') as json_file:
+        json_file.write(json.dumps(json_content, indent=2))
+
+    return json_path
+
+
+
+def idl_tuple_proc__(
+    idl_tuple,
+    output_dir,
+):
+    idl_parts = idl_tuple.rsplit(':', 1)
+    assert len(idl_parts) == 2
+    locator = definition.IdlLocator(*idl_parts)
+    try:
+        idl_file = parse_idl_file(locator)                   ###### slow ?
+    except Exception as e:
+        print('Error processing idl file: ' +
+              str(locator.get_absolute_path()), file=sys.stderr)
+        raise e
+
+    idl_rel_path = Path(idl_parts[1])
+    generate_to_dir = (output_dir / idl_rel_path).parent
+    generate_to_dir.mkdir(parents=True, exist_ok=True)
+
+    return idl_file.content.elements
+
+
+
+
+from multiprocessing import Pool
+from functools import partial
+
+
 def generate_type_hash(generator_arguments_file: str) -> List[str]:
     with open(generator_arguments_file, 'r') as f:
         args = json.load(f)
@@ -108,27 +165,52 @@ def generate_type_hash(generator_arguments_file: str) -> List[str]:
 
     # Define all local IndividualTypeDescriptions
     individual_types = {}
-    for idl_tuple in idl_tuples:
-        idl_parts = idl_tuple.rsplit(':', 1)
-        assert len(idl_parts) == 2
-        locator = definition.IdlLocator(*idl_parts)
-        try:
-            idl_file = parse_idl_file(locator)
-        except Exception as e:
-            print('Error processing idl file: ' +
-                  str(locator.get_absolute_path()), file=sys.stderr)
-            raise e
 
-        idl_rel_path = Path(idl_parts[1])
-        generate_to_dir = (output_dir / idl_rel_path).parent
-        generate_to_dir.mkdir(parents=True, exist_ok=True)
-        for el in idl_file.content.elements:
-            if isinstance(el, definition.Message):
-                add_msg(el, individual_types)
-            elif isinstance(el, definition.Service):
-                add_srv(el, individual_types)
-            elif isinstance(el, definition.Action):
-                add_action(el, individual_types)
+    my_pool = Pool()
+    partial_idl_tuple_proc__ = partial(
+        idl_tuple_proc__,
+        output_dir=output_dir,
+    )
+
+    with my_pool:
+        pool_results = my_pool.map(
+            partial_idl_tuple_proc__,
+            idl_tuples,
+        )
+
+    #print(pool_results)
+
+    pool_results = [el for els in pool_results for el in els]
+    for el in pool_results:
+        if isinstance(el, definition.Message):
+            add_msg(el, individual_types)
+        elif isinstance(el, definition.Service):
+            add_srv(el, individual_types)
+        elif isinstance(el, definition.Action):
+            add_action(el, individual_types)
+
+
+    # for idl_tuple in idl_tuples:
+    #     idl_parts = idl_tuple.rsplit(':', 1)
+    #     assert len(idl_parts) == 2
+    #     locator = definition.IdlLocator(*idl_parts)
+    #     try:
+    #         idl_file = parse_idl_file(locator)                   ###### slow ?
+    #     except Exception as e:
+    #         print('Error processing idl file: ' +
+    #               str(locator.get_absolute_path()), file=sys.stderr)
+    #         raise e
+
+    #     idl_rel_path = Path(idl_parts[1])
+    #     generate_to_dir = (output_dir / idl_rel_path).parent
+    #     generate_to_dir.mkdir(parents=True, exist_ok=True)
+    #     for el in idl_file.content.elements:
+    #         if isinstance(el, definition.Message):
+    #             add_msg(el, individual_types)
+    #         elif isinstance(el, definition.Service):
+    #             add_srv(el, individual_types)
+    #         elif isinstance(el, definition.Action):
+    #             add_action(el, individual_types)
 
     # Determine needed includes for types from other packages
     pending_includes = set()
@@ -184,28 +266,23 @@ def generate_type_hash(generator_arguments_file: str) -> List[str]:
 
     # Write JSON output for each full TypeDescription
     generated_files = []
-    for full_type_description in full_types:
-        top_type_name = full_type_description['type_description']['type_name']
-        hashes = [{
-            'type_name': top_type_name,
-            'hash_string': hash_lookup[top_type_name],
-        }]
-        for referenced_type in full_type_description['referenced_type_descriptions']:
-            hashes.append({
-                'type_name': referenced_type['type_name'],
-                'hash_string': hash_lookup[referenced_type['type_name']],
-            })
-        json_content = {
-            'type_description_msg': full_type_description,
-            'type_hashes': hashes,
-        }
-        rel_path = Path(*top_type_name.split('/')[1:])
-        json_path = output_dir / rel_path.with_suffix('.json')
-        with json_path.open('w', encoding='utf-8') as json_file:
-            json_file.write(json.dumps(json_content, indent=2))
-        generated_files.append(json_path)
 
-    return generated_files
+    my_pool = Pool()
+    pool_results = []
+    partial_generate_type_hash__ = partial(
+        generate_type_hash__,
+        hash_lookup=hash_lookup,
+        output_dir=output_dir,
+    )
+    with my_pool:
+        pool_results = my_pool.map(
+            partial_generate_type_hash__,
+            full_types,
+        )
+
+    print(pool_results)
+
+    return pool_results
 
 
 def parse_rihs_string(rihs_str: str) -> Tuple[int, str]:

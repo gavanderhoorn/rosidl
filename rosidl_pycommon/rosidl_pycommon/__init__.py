@@ -58,6 +58,72 @@ def get_newest_modification_time(
     return newest_timestamp
 
 
+
+def generate_file__(
+    idl_tuple,
+    type_description_files,
+    ros_interface_files,
+    mapping,
+    args,
+    additional_context,
+    latest_target_timestamp,
+    template_basepath,
+    keep_case,
+    post_process_callback,
+) -> List[str]:
+
+    generated_files: List[str] = []
+
+    idl_parts = idl_tuple.rsplit(':', 1)
+    assert len(idl_parts) == 2
+    locator = IdlLocator(*idl_parts)
+    idl_rel_path = pathlib.Path(idl_parts[1])
+
+    type_description_info = None
+    if type_description_files:
+        type_hash_file = type_description_files[idl_parts[1]]
+        with open(type_hash_file, 'r') as f:
+            type_description_info = json.load(f)
+
+    idl_stem = idl_rel_path.stem
+    type_source_key = (idl_rel_path.parts[-2], idl_stem)
+    type_source_file = ros_interface_files.get(type_source_key, locator.get_absolute_path())
+    if not keep_case:
+        idl_stem = convert_camel_case_to_lower_case_underscore(idl_stem)
+    try:
+        idl_file = parse_idl_file(locator)
+        for template_file, generated_filename in mapping.items():
+            generated_file = os.path.join(
+                args['output_dir'], str(idl_rel_path.parent),
+                generated_filename % idl_stem)
+            generated_files.append(generated_file)
+            data = {
+                'package_name': args['package_name'],
+                'interface_path': idl_rel_path,
+                'content': idl_file.content,
+                'type_description_info': type_description_info,
+                'type_source_file': type_source_file,
+            }
+            if additional_context is not None:
+                data.update(additional_context)
+            expand_template(
+                os.path.basename(template_file), data,
+                generated_file, minimum_timestamp=latest_target_timestamp,
+                template_basepath=template_basepath,
+                post_process_callback=post_process_callback)
+    except Exception as e:
+        print(
+            'Error processing idl file: ' +
+            str(locator.get_absolute_path()), file=sys.stderr)
+        raise e
+
+    return generated_files
+
+
+
+from multiprocessing import Pool
+from functools import partial
+
 def generate_files(
     generator_arguments_file: str, mapping: Dict[str, str],
     additional_context: Optional[Dict[str, bool]] = None,
@@ -85,51 +151,45 @@ def generate_files(
         key = (p.suffix[1:], p.stem)
         ros_interface_files[key] = p
 
-    for idl_tuple in args.get('idl_tuples', []):
-        idl_parts = idl_tuple.rsplit(':', 1)
-        assert len(idl_parts) == 2
-        locator = IdlLocator(*idl_parts)
-        idl_rel_path = pathlib.Path(idl_parts[1])
+    my_pool = Pool()
+    pool_results = []
+    partial_generate_file__ = partial(
+        generate_file__,
+        type_description_files=type_description_files,
+        ros_interface_files=ros_interface_files,
+        mapping=mapping,
+        args=args,
+        additional_context=additional_context,
+        latest_target_timestamp=latest_target_timestamp,
+        template_basepath=template_basepath,
+        keep_case=keep_case,
+        post_process_callback=post_process_callback,
+    )
 
-        type_description_info = None
-        if type_description_files:
-            type_hash_file = type_description_files[idl_parts[1]]
-            with open(type_hash_file, 'r') as f:
-                type_description_info = json.load(f)
+    with my_pool:
+        pool_results = my_pool.map(
+            partial_generate_file__,
+            args.get('idl_tuples', []),
+        )
 
-        idl_stem = idl_rel_path.stem
-        type_source_key = (idl_rel_path.parts[-2], idl_stem)
-        type_source_file = ros_interface_files.get(type_source_key, locator.get_absolute_path())
-        if not keep_case:
-            idl_stem = convert_camel_case_to_lower_case_underscore(idl_stem)
-        try:
-            idl_file = parse_idl_file(locator)
-            for template_file, generated_filename in mapping.items():
-                generated_file = os.path.join(
-                    args['output_dir'], str(idl_rel_path.parent),
-                    generated_filename % idl_stem)
-                generated_files.append(generated_file)
-                data = {
-                    'package_name': args['package_name'],
-                    'interface_path': idl_rel_path,
-                    'content': idl_file.content,
-                    'type_description_info': type_description_info,
-                    'type_source_file': type_source_file,
-                }
-                if additional_context is not None:
-                    data.update(additional_context)
-                expand_template(
-                    os.path.basename(template_file), data,
-                    generated_file, minimum_timestamp=latest_target_timestamp,
-                    template_basepath=template_basepath,
-                    post_process_callback=post_process_callback)
-        except Exception as e:
-            print(
-                'Error processing idl file: ' +
-                str(locator.get_absolute_path()), file=sys.stderr)
-            raise e
+    #print(pool_results)
+    # for idl_tuple in args.get('idl_tuples', []):
+    #     generated_files_ = generate_file__(
+    #                         idl_tuple,
+    #                         type_description_files,
+    #                         ros_interface_files,
+    #                         mapping,
+    #                         args,
+    #                         additional_context,
+    #                         latest_target_timestamp,
+    #                         template_basepath,
+    #                         keep_case,
+    #                         post_process_callback)
 
-    return generated_files
+    #     generated_files.extend(generated_files_)
+
+    # [f for al in a for f in al]
+    return [f for fs in pool_results for f in fs]
 
 
 template_prefix_path: List[pathlib.Path] = []
